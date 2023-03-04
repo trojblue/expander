@@ -5,11 +5,14 @@ from PIL import Image
 from pathlib import Path
 
 import os
+
 os.environ["HF_HOME"] = str(Path("D:/Andrew/Cache/Huggingface"))
 
 blip2_processor = AutoProcessor.from_pretrained("Salesforce/blip2-opt-2.7b")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-blip2_model = Blip2ForConditionalGeneration.from_pretrained("Salesforce/blip2-opt-2.7b", device_map="auto")
+blip2_model = Blip2ForConditionalGeneration.from_pretrained(
+    "Salesforce/blip2-opt-2.7b", device_map="auto"
+)
 
 
 def generate_caption(processor, model, image, tokenizer=None, use_float_16=False):
@@ -24,16 +27,21 @@ def generate_caption(processor, model, image, tokenizer=None, use_float_16=False
     generated_ids = model.generate(pixel_values=inputs.pixel_values, max_length=50)
 
     if tokenizer is not None:
-        generated_caption = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        generated_caption = tokenizer.batch_decode(
+            generated_ids, skip_special_tokens=True
+        )[0]
     else:
-        generated_caption = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        generated_caption = processor.batch_decode(
+            generated_ids, skip_special_tokens=True
+        )[0]
 
     return generated_caption
 
 
-
 def generate_captions(image):
-    caption_blip2 = generate_caption(blip2_processor, blip2_model, image, use_float_16=True).strip()
+    caption_blip2 = generate_caption(
+        blip2_processor, blip2_model, image, use_float_16=True
+    ).strip()
     return caption_blip2
 
 
@@ -54,7 +62,7 @@ def check_CUDNN():
         print("CUDA is not available!")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     check_CUDNN()
     # image = Image.open("sample.jpg")
 
