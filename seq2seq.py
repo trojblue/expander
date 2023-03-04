@@ -45,6 +45,7 @@ class CaptionTagDataset(Dataset):
 
         labels = self.tokenizer.encode(
             tag_str,
+            truncation=True,
             add_special_tokens=False
         )
 
@@ -79,7 +80,8 @@ class CaptionTagDataset(Dataset):
 
 
 
-def train(model, tokenizer, train_dataset, val_dataset, epochs=5, batch_size=8, lr=1e-4, checkpoint_dir='./checkpoints', wandb_project=None, wandb_run_name=None, resume_checkpoint=None):
+def train(model, tokenizer, train_dataset, val_dataset, epochs=5, batch_size=8, lr=1e-4,
+          checkpoint_dir='./checkpoints', wandb_project=None, wandb_run_name=None, resume_checkpoint=None):
     optimizer = AdamW(model.parameters(), lr=lr)
     total_steps = len(train_dataset) * epochs
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=1, T_mult=2, eta_min=lr/10)
@@ -149,15 +151,6 @@ def train(model, tokenizer, train_dataset, val_dataset, epochs=5, batch_size=8, 
                 'lr': scheduler.get_last_lr()[0]
             }, step=epoch)
 
-#         eval_loss = evaluate(model, tokenizer, val_loader, criterion)
-#         print(f'Val Loss: {eval_loss:.4f}')
-
-#         # Log metrics to wandb
-#         if wandb_project and wandb_run_name:
-#             wandb.log({
-#                 'valid_loss': eval_loss,
-#                 'lr': scheduler.get_last_lr()[0]
-#             }, step=epoch)
 
         # Save checkpoint
         if not os.path.exists(checkpoint_dir):
