@@ -1,7 +1,10 @@
 import pandas as pd
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from transformers import T5Tokenizer, T5ForConditionalGeneration, AdamW, get_linear_schedule_with_warmup
 import torch
 from torch.utils.data import Dataset, DataLoader
+from tqdm.auto import tqdm
+from torch.utils.tensorboard import SummaryWriter
 
 
 class CaptionTagDataset(Dataset):
@@ -10,6 +13,9 @@ class CaptionTagDataset(Dataset):
         self.tag_strs = tag_strs
         self.tokenizer = tokenizer
         self.max_len = max_len
+
+        # Find the maximum length of all tag strings in the dataset
+        self.max_tag_len = max(len(self.tokenizer.encode(tag_str)) for tag_str in self.tag_strs)
 
     def __len__(self):
         return len(self.captions)
@@ -22,6 +28,7 @@ class CaptionTagDataset(Dataset):
             caption,
             add_special_tokens=True,
             padding='max_length',
+            truncation=True,  # truncates inputs that exceed max_len
             max_length=self.max_len,
             return_tensors='pt'
         )
@@ -30,6 +37,13 @@ class CaptionTagDataset(Dataset):
             tag_str,
             add_special_tokens=False
         )
+
+        # Truncate the label tensor to the maximum length
+        labels = labels[:self.max_tag_len]
+
+        # Pad the label tensor with the padding token to the maximum length
+        padding_length = self.max_tag_len - len(labels)
+        labels += [self.tokenizer.pad_token_id] * padding_length
 
         return {
             'input_ids': inputs['input_ids'].squeeze(),
@@ -40,45 +54,57 @@ class CaptionTagDataset(Dataset):
 
 def train(model, tokenizer, train_dataset, val_dataset, epochs=5, batch_size=8, lr=1e-4):
     optimizer = AdamW(model.parameters(), lr=lr)
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0,
-                                                num_training_steps=len(train_dataset) * epochs)
-    criterion = torch.nn.CrossEntropyLoss()
+    total_steps = len(train_dataset) * epochs
+    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=total_steps//10, T_mult=2, eta_min=lr/10)
 
+    print(f"total steps: {total_steps} | loading data.....")
+    criterion = torch.nn.CrossEntropyLoss()
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    writer = SummaryWriter()
 
     model.train()
     for epoch in range(epochs):
         running_loss = 0
 
-        for batch in train_loader:
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
+        with tqdm(total=len(train_loader), desc=f'Epoch {epoch+1}/{epochs}', unit='batch') as pbar:
+            for batch in train_loader:
+                input_ids = batch['input_ids'].to(device)
+                attention_mask = batch['attention_mask'].to(device)
+                labels = batch['labels'].to(device)
 
-            optimizer.zero_grad()
+                optimizer.zero_grad()
 
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels
+                )
 
-            loss = outputs.loss
-            running_loss += loss.item()
+                loss = outputs.loss
+                running_loss += loss.item()
 
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
 
-        train_loss = running_loss / len(train_loader)
-        print(f'Epoch {epoch + 1}/{epochs}, Train Loss: {train_loss:.4f}')
+                pbar.update(1)
 
-        eval_loss = evaluate(model, tokenizer, val_loader, criterion)
-        print(f'Epoch {epoch + 1}/{epochs}, Val Loss: {eval_loss:.4f}')
+            train_loss = running_loss / len(train_loader)
+            print(f'Train Loss: {train_loss:.4f}')
+
+            writer.add_scalar('Loss/Train', train_loss, epoch+1)
+
+            eval_loss = evaluate(model, tokenizer, val_loader, criterion)
+            print(f'Val Loss: {eval_loss:.4f}')
+
+            writer.add_scalar('Loss/Val', eval_loss, epoch+1)
+
+    writer.close()
 
 
-def evaluate(model, tokenizer, dataloader, criterion, device):
+def evaluate(model, tokenizer, dataloader, criterion):
     model.eval()
     running_loss = 0
 
@@ -130,17 +156,18 @@ def predict(model, tokenizer, input_str):
 
 if __name__ == '__main__':
     # Load the dataset
-    df = pd.read_csv('sample.csv')
+    df = pd.read_csv('combined.csv')
 
     # Initialize the tokenizer and the model
-    tokenizer = T5Tokenizer.from_pretrained('t5-small', model_max_length=128)
+    tokenizer = T5Tokenizer.from_pretrained('t5-small', model_max_length=512)
     model = T5ForConditionalGeneration.from_pretrained('t5-small')
 
     # Create the datasets
-    train_dataset = CaptionTagDataset(df['caption'][:8000], df['tag_str'][:8000], tokenizer)
-    val_dataset = CaptionTagDataset(df['caption'][8000:], df['tag_str'][8000:], tokenizer)
+    train_count = int(len(df['caption']) * 0.85)
+    train_dataset = CaptionTagDataset(df['caption'][:train_count], df['tag_str'][:train_count], tokenizer)
+    val_dataset = CaptionTagDataset(df['caption'][train_count:], df['tag_str'][train_count:], tokenizer)
 
     # Train the model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
-    train(model, tokenizer, train_dataset, val_dataset, epochs=5, batch_size=8, lr=1e-4)
+    train(model, tokenizer, train_dataset, val_dataset, epochs=5, batch_size=4, lr=1e-4)
