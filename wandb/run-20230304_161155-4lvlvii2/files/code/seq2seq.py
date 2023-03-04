@@ -82,7 +82,7 @@ class CaptionTagDataset(Dataset):
 def train(model, tokenizer, train_dataset, val_dataset, epochs=5, batch_size=8, lr=1e-4, checkpoint_dir='./checkpoints', wandb_project=None, wandb_run_name=None, resume_checkpoint=None):
     optimizer = AdamW(model.parameters(), lr=lr)
     total_steps = len(train_dataset) * epochs
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=1, T_mult=2, eta_min=lr/10)
+    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=total_steps//10, T_mult=2, eta_min=lr/10)
 
     print(f"total steps: {total_steps} | loading data.....")
     criterion = torch.nn.CrossEntropyLoss()
@@ -149,35 +149,31 @@ def train(model, tokenizer, train_dataset, val_dataset, epochs=5, batch_size=8, 
                 'lr': scheduler.get_last_lr()[0]
             }, step=epoch)
 
-#         eval_loss = evaluate(model, tokenizer, val_loader, criterion)
-#         print(f'Val Loss: {eval_loss:.4f}')
+        eval_loss = evaluate(model, tokenizer, val_loader, criterion)
+        print(f'Val Loss: {eval_loss:.4f}')
 
-#         # Log metrics to wandb
-#         if wandb_project and wandb_run_name:
-#             wandb.log({
-#                 'valid_loss': eval_loss,
-#                 'lr': scheduler.get_last_lr()[0]
-#             }, step=epoch)
+        # Log metrics to wandb
+        if wandb_project and wandb_run_name:
+            wandb.log({
+                'valid_loss': eval_loss,
+                'lr': scheduler.get_last_lr()[0]
+            }, step=epoch)
 
         # Save checkpoint
-        if not os.path.exists(checkpoint_dir):
-            os.mkdir(checkpoint_dir)
         checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint-{epoch + 1}.pt')
         torch.save({
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
-            'train_loss': train_loss
+            'train_loss': train_loss,
+            'eval_loss': eval_loss
         }, checkpoint_path)
 
 
 def evaluate(model, tokenizer, dataloader, criterion):
     model.eval()
     running_loss = 0
-
-    if len(dataloader.dataset.captions) == 0:
-        return 0
 
     with torch.no_grad():
         for batch in dataloader:
@@ -228,7 +224,7 @@ def predict(model, tokenizer, input_str):
 if __name__ == '__main__':
     # Load the dataset
     df = pd.read_csv('combined.csv')
-
+    
     scaler = GradScaler()
     wandb.login(key="d54d2352c5b2584e747217ed95674b5cf52cb86c")
 
@@ -237,7 +233,7 @@ if __name__ == '__main__':
     model = T5ForConditionalGeneration.from_pretrained('t5-small')
 
     # Create the datasets
-    train_count = int(len(df['caption']) * 0.95)
+    train_count = int(len(df['caption']) * 0.85)
     train_dataset = CaptionTagDataset(df['caption'][:train_count], df['tag_str'][:train_count], tokenizer)
     val_dataset = CaptionTagDataset(df['caption'][train_count:], df['tag_str'][train_count:], tokenizer)
 
@@ -246,5 +242,5 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
     train(model, tokenizer, train_dataset, val_dataset,
-          epochs=10, batch_size=16, lr=5e-5,
+          epochs=5, batch_size=4, lr=1e-4,
           wandb_project="seq2seq", wandb_run_name=f"run_{date_str}")

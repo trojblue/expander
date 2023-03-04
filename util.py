@@ -7,6 +7,7 @@ import os
 import csv
 
 
+
 def combine_files(base_dir:str, root_dirs:List[str]):
     """
 
@@ -15,7 +16,6 @@ def combine_files(base_dir:str, root_dirs:List[str]):
     :return: 创建csv文件
     :rtype:
     """
-
     combined_data = []
     for root_dir in root_dirs:
         caption_dir = os.path.join(base_dir, root_dir)  # caption: base_dir/subdir/*.txt; 每项一个txt
@@ -46,6 +46,7 @@ if __name__ == '__main__':
         "aesthetics.1280.cmb.m4",
         "px_rank_m_2022-ALL",
         "px_rank_m_2021-ALL",
+        "202122-nodbr-match"
     ]
 
     combine_files(base_dir, dir_names)

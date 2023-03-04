@@ -1,0 +1,234 @@
+diff --git a/README.md b/README.md
+index 151a3b8..9b2fea4 100644
+--- a/README.md
++++ b/README.md
+@@ -5,3 +5,6 @@ install dependencies: (default pip doesn't work)
+ pip install -r requirements.txt
+ pip install git+https://github.com/huggingface/transformers
+ ```
++
++
++`util.py`: 从txt文件夹(blip & training tags)变为csv文件
+\ No newline at end of file
+diff --git a/seq2seq.py b/seq2seq.py
+index 8188504..85e6e1c 100644
+--- a/seq2seq.py
++++ b/seq2seq.py
+@@ -1,10 +1,16 @@
++import datetime
++import os
++
+ import pandas as pd
+ from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+ from transformers import T5Tokenizer, T5ForConditionalGeneration, AdamW, get_linear_schedule_with_warmup
+ import torch
+ from torch.utils.data import Dataset, DataLoader
+ from tqdm.auto import tqdm
++from torch.cuda.amp import autocast, GradScaler
+ from torch.utils.tensorboard import SummaryWriter
++import wandb
++
+ 
+ 
+ class CaptionTagDataset(Dataset):
+@@ -17,6 +23,10 @@ class CaptionTagDataset(Dataset):
+         # Find the maximum length of all tag strings in the dataset
+         self.max_tag_len = max(len(self.tokenizer.encode(tag_str)) for tag_str in self.tag_strs)
+ 
++        # Preprocess the data
++        self._data = [{'caption': caption, 'tag_str': tag_str} for caption, tag_str in zip(self.captions, self.tag_strs)]
++        self._preprocess()
++
+     def __len__(self):
+         return len(self.captions)
+ 
+@@ -51,8 +61,25 @@ class CaptionTagDataset(Dataset):
+             'labels': torch.tensor(labels)
+         }
+ 
++    def _preprocess(self):
++        def preprocess_item(item):
++            caption = item['caption']
++            tag_str = item['tag_str']
++
++            # Add any preprocessing steps here
++
++            return {
++                'caption': caption,
++                'tag_str': tag_str
++            }
++
++        # Apply the preprocessing function to each item in the dataset
++        self._data = list(map(preprocess_item, self._data))
++
++
+ 
+-def train(model, tokenizer, train_dataset, val_dataset, epochs=5, batch_size=8, lr=1e-4):
++
++def train(model, tokenizer, train_dataset, val_dataset, epochs=5, batch_size=8, lr=1e-4, checkpoint_dir='./checkpoints', wandb_project=None, wandb_run_name=None, resume_checkpoint=None):
+     optimizer = AdamW(model.parameters(), lr=lr)
+     total_steps = len(train_dataset) * epochs
+     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=total_steps//10, T_mult=2, eta_min=lr/10)
+@@ -62,46 +89,86 @@ def train(model, tokenizer, train_dataset, val_dataset, epochs=5, batch_size=8,
+     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+ 
+-    writer = SummaryWriter()
++    # Initialize wandb run
++    if wandb_project and wandb_run_name:
++        wandb.init(project=wandb_project, name=wandb_run_name)
++
++    start_epoch = 0
++    if resume_checkpoint:
++        checkpoint = torch.load(resume_checkpoint)
++        model.load_state_dict(checkpoint['model_state_dict'])
++        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
++        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
++        start_epoch = checkpoint['epoch']
++        print(f"Resuming from epoch {start_epoch+1}...")
++
+ 
+     model.train()
+-    for epoch in range(epochs):
++    for epoch in range(start_epoch, epochs):
+         running_loss = 0
+ 
+-        with tqdm(total=len(train_loader), desc=f'Epoch {epoch+1}/{epochs}', unit='batch') as pbar:
+-            for batch in train_loader:
++        with tqdm(total=len(train_loader), desc=f'Epoch {epoch + 1}/{epochs}', unit='batch') as pbar:
++            for batch_idx, batch in enumerate(train_loader):
+                 input_ids = batch['input_ids'].to(device)
+                 attention_mask = batch['attention_mask'].to(device)
+                 labels = batch['labels'].to(device)
+ 
+                 optimizer.zero_grad()
+ 
+-                outputs = model(
+-                    input_ids=input_ids,
+-                    attention_mask=attention_mask,
+-                    labels=labels
+-                )
++                with autocast():
++                    outputs = model(
++                        input_ids=input_ids,
++                        attention_mask=attention_mask,
++                        labels=labels
++                    )
+ 
+-                loss = outputs.loss
+-                running_loss += loss.item()
++                    loss = outputs.loss
++                    running_loss += loss.item()
+ 
+-                loss.backward()
+-                optimizer.step()
++                scaler.scale(loss).backward()
++                scaler.step(optimizer)
++                scaler.update()
+                 scheduler.step()
+ 
+-                pbar.update(1)
+-
+-            train_loss = running_loss / len(train_loader)
+-            print(f'Train Loss: {train_loss:.4f}')
+-
+-            writer.add_scalar('Loss/Train', train_loss, epoch+1)
++                # Log loss information to wandb
++                if wandb_project and wandb_run_name:
++                    wandb.log({
++                        'train_loss': loss.item(),
++                        'lr': scheduler.get_last_lr()[0]
++                    }, step=batch_idx + epoch * len(train_loader))
+ 
+-            eval_loss = evaluate(model, tokenizer, val_loader, criterion)
+-            print(f'Val Loss: {eval_loss:.4f}')
+-
+-            writer.add_scalar('Loss/Val', eval_loss, epoch+1)
++                pbar.update(1)
+ 
+-    writer.close()
++        train_loss = running_loss / len(train_loader)
++        print(f'Train Loss: {train_loss:.4f}')
++
++        # Log metrics to wandb
++        if wandb_project and wandb_run_name:
++            wandb.log({
++                'train_loss_average': train_loss,
++                'lr': scheduler.get_last_lr()[0]
++            }, step=epoch)
++
++        eval_loss = evaluate(model, tokenizer, val_loader, criterion)
++        print(f'Val Loss: {eval_loss:.4f}')
++
++        # Log metrics to wandb
++        if wandb_project and wandb_run_name:
++            wandb.log({
++                'valid_loss': eval_loss,
++                'lr': scheduler.get_last_lr()[0]
++            }, step=epoch)
++
++        # Save checkpoint
++        checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint-{epoch + 1}.pt')
++        torch.save({
++            'epoch': epoch + 1,
++            'model_state_dict': model.state_dict(),
++            'optimizer_state_dict': optimizer.state_dict(),
++            'scheduler_state_dict': scheduler.state_dict(),
++            'train_loss': train_loss,
++            'eval_loss': eval_loss
++        }, checkpoint_path)
+ 
+ 
+ def evaluate(model, tokenizer, dataloader, criterion):
+@@ -157,6 +224,9 @@ def predict(model, tokenizer, input_str):
+ if __name__ == '__main__':
+     # Load the dataset
+     df = pd.read_csv('combined.csv')
++    
++    scaler = GradScaler()
++    wandb.login(key="d54d2352c5b2584e747217ed95674b5cf52cb86c")
+ 
+     # Initialize the tokenizer and the model
+     tokenizer = T5Tokenizer.from_pretrained('t5-small', model_max_length=512)
+@@ -168,6 +238,9 @@ if __name__ == '__main__':
+     val_dataset = CaptionTagDataset(df['caption'][train_count:], df['tag_str'][train_count:], tokenizer)
+ 
+     # Train the model
++    date_str = str(datetime.datetime.now())
+     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+     model.to(device)
+-    train(model, tokenizer, train_dataset, val_dataset, epochs=5, batch_size=4, lr=1e-4)
+\ No newline at end of file
++    train(model, tokenizer, train_dataset, val_dataset,
++          epochs=5, batch_size=4, lr=1e-4,
++          wandb_project="seq2seq", wandb_run_name=f"run_{date_str}")
+\ No newline at end of file
+diff --git a/util.py b/util.py
+index 3f9930b..f99b5ce 100644
+--- a/util.py
++++ b/util.py
+@@ -7,6 +7,7 @@ import os
+ import csv
+ 
+ 
++
+ def combine_files(base_dir:str, root_dirs:List[str]):
+     """
+ 
+@@ -15,7 +16,6 @@ def combine_files(base_dir:str, root_dirs:List[str]):
+     :return: 创建csv文件
+     :rtype:
+     """
+-
+     combined_data = []
+     for root_dir in root_dirs:
+         caption_dir = os.path.join(base_dir, root_dir)  # caption: base_dir/subdir/*.txt; 每项一个txt
+@@ -46,6 +46,7 @@ if __name__ == '__main__':
+         "aesthetics.1280.cmb.m4",
+         "px_rank_m_2022-ALL",
+         "px_rank_m_2021-ALL",
++        "202122-nodbr-match"
+     ]
+ 
+     combine_files(base_dir, dir_names)
+\ No newline at end of file
