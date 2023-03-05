@@ -42,7 +42,7 @@ def try_eval_2():
     from transformers import T5Tokenizer, T5ForConditionalGeneration
 
     # Load the trained checkpoint
-    checkpoint_path = "./checkpoints/checkpoint_2.pt"
+    checkpoint_path = "./checkpoints/checkpoint_6.pt"
     checkpoint = torch.load(checkpoint_path)
 
     # Load the tokenizer and the model
@@ -53,7 +53,7 @@ def try_eval_2():
     input_texts = [
         "A cute puppy sitting on the grass",
         "a woman in a black outfit sitting on a bench with her legs crossed and her legs crossed, with a building in the background",
-        "a group of people in the water with a boat and a bird flying above them and a woman in a bikini",
+        "a group sitting in crowded citycenter",
         "1girl",
         "1girl, long hair",
     ]
@@ -63,7 +63,7 @@ def try_eval_2():
         input_ids = tokenizer.encode(input_text, return_tensors="pt", truncation=True)
 
         # Generate the output text
-        output_ids = model.generate(input_ids)
+        output_ids = model.generate(input_ids, max_new_tokens=150)
         output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
         outputs.append(output_text)
 
